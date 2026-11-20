@@ -52,7 +52,7 @@ public abstract class WorldUnit
 /// The simulation of one map: its server units, advanced on the game loop's tick. Created on first use per scene
 /// entry (World.Map).
 /// </summary>
-public sealed class MapInstance(long sceneEntry, World world) : IGameTicker
+public sealed partial class MapInstance(long sceneEntry, World world) : IGameTicker
 {
     /// <summary>Grid cell size in m: a 60 m view radius touches at most 5 x 5 cells.</summary>
     public const int CellSize = 32;
@@ -82,6 +82,7 @@ public sealed class MapInstance(long sceneEntry, World world) : IGameTicker
         unit.Cell = CellOf(unit.X, unit.Z);
         if (!_cells.TryGetValue(unit.Cell, out var list)) _cells[unit.Cell] = list = [];
         list.Add(unit);
+        Wake();
     }
 
     internal void Remove(WorldUnit unit)
@@ -95,6 +96,7 @@ public sealed class MapInstance(long sceneEntry, World world) : IGameTicker
     /// <summary>Re-files a unit that moved.</summary>
     public void Moved(WorldUnit unit)
     {
+        Wake();
         var cell = CellOf(unit.X, unit.Z);
         if (cell == unit.Cell) return;
         if (_cells.TryGetValue(unit.Cell, out var old)) old.Remove(unit);
@@ -132,6 +134,6 @@ public sealed class MapInstance(long sceneEntry, World world) : IGameTicker
 
     public void Tick(GameTime time)
     {
-        foreach (var unit in _units.ToArray()) unit.Tick(this, time);
+        TickUnits(time);
     }
 }

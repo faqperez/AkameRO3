@@ -100,8 +100,13 @@ public sealed partial class TerritoryWarsService : IGameTicker
         {
             Ownership.ReservationKey.Entity("realm", nameof(RealmStateKind.TerritoryWars)),
         };
-        if (state.Epoch.Length > 0) keys.Add(Ownership.ReservationKey.Entity("territory_season", state.Epoch));
-        if (Epoch.Length > 0) keys.Add(Ownership.ReservationKey.Entity("territory_season", Epoch));
+        bool seasonTransition = state.Epoch != Epoch || _seasonCleanupState != null;
+        if (state.Epoch.Length > 0)
+            keys.Add(seasonTransition ? Ownership.ReservationKey.Entity("territory_season", state.Epoch)
+                : Ownership.ReservationKey.SharedEntity("territory_season", state.Epoch));
+        if (Epoch.Length > 0)
+            keys.Add(seasonTransition ? Ownership.ReservationKey.Entity("territory_season", Epoch)
+                : Ownership.ReservationKey.SharedEntity("territory_season", Epoch));
         if (_seasonCleanupState is { Epoch.Length: > 0 } retiring)
             keys.Add(Ownership.ReservationKey.Entity("territory_season", retiring.Epoch));
         if (actor?.Role is { } role) keys.Add(Ownership.ReservationKey.Role(role.Id));

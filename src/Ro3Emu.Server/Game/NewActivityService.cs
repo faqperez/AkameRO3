@@ -188,7 +188,11 @@ public sealed partial class NewActivityService
             session.ActivitiesReady = true;
             _tasks.OnStateChanged(session); // the open activities' quests (TaskService.ActivityTasks.cs)
             ScheduleDeadline(session);
-            PassEvent(session, []); // the day played, and any daily activity earned while the pass was not watching
+            if (_passPlay)
+            {
+                await PassProgressCoreAsync(session, [], 0, 0, 0, 0);
+                if (!session.DeferTaskSync) await _tasks.SyncTasksAsync(session);
+            }
         }
         finally { session.ActivityGate.Release(); ownerScope?.Dispose(); }
     }

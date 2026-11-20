@@ -416,6 +416,7 @@ public sealed class PowerService : IGameTicker
         if (time.Now - _lastProbe < ProbeEvery) return;
         _lastProbe = time.Now;
         var all = _sessions.All();
+        if (_dirty.Count == 0 && all.Count == 0) return;
         var probe = new HashSet<GameSession>(_dirty);
         _dirty.Clear();
         if (all.Count > 0)
@@ -428,7 +429,11 @@ public sealed class PowerService : IGameTicker
         foreach (var s in probe)
         {
             if (!Live(s) || _queued.Contains(s)) continue;
-            if (s.Handoff != null || now - s.PowerPublishedMs < Throttle) { _dirty.Add(s); continue; }
+            if (s.Handoff != null || s.Owner?.State == Ownership.RoleOwnerState.Loading || now - s.PowerPublishedMs < Throttle)
+            {
+                _dirty.Add(s);
+                continue;
+            }
             try
             {
                 var (total, package) = Compute(s);

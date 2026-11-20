@@ -23,7 +23,7 @@ namespace Ro3Emu.Server.Game;
 /// Nine rows whose source does not exist or whose meaning is unresolved stay at status 0 (§5, "Blocked").
 /// 76004 (share) has no sender in the client and stays unrouted.
 /// </summary>
-public sealed class AchievementService : IGameTicker
+public sealed partial class AchievementService : IGameTicker
 {
     public const uint Sync = 5019, GetReward = 76002, GetPointReward = 76003, UpdateHintLevel = 76009, GetAllReward = 76010;
 
@@ -284,17 +284,7 @@ public sealed class AchievementService : IGameTicker
 
     /// <summary>achievementLevelInfo for type 0 and every category: point and level (the client reads neither,
     /// inferred), curLevelRewardLevel and curHintLevel (kept as stored).</summary>
-    private void RefreshLevels(DBRoleAchievementInfo state)
-    {
-        foreach (int type in Rows().Tiers.Keys.Order())
-        {
-            var info = state.AchievementLevelInfo.TryGetValue(type, out var old) ? old.Clone() : new AchievementLevelInfo { Type = type };
-            info.Type = type;
-            info.Point = Points(state, type);
-            info.Level = Level(state, type);
-            if (!info.Equals(old)) state.AchievementLevelInfo[type] = info;
-        }
-    }
+    private void RefreshLevels(DBRoleAchievementInfo state) => RefreshLevelsFast(state);
 
     /// <summary>Drops ids the client cannot resolve and fits every score list to the row's target count.</summary>
     private void Normalize(DBRoleAchievementInfo state)
@@ -409,8 +399,7 @@ public sealed class AchievementService : IGameTicker
     /// <summary>The highest _iLevel whose _iScore the fashion score reaches, the level the Wardrobe's level panel
     /// shows and claims up to (UI_Sys_WardrobeLevelPanelCtrl, see DailyActivityService.StageError). That 303001 reads
     /// this level is inferred from its text, "Reach Wardrobe Fashion Rating Lv. @{1}".</summary>
-    private long FashionLevel(long score) =>
-        Rows().FashionLevels.Where(l => l.Score <= score).Select(l => l.Level).DefaultIfEmpty(0).Max();
+    private long FashionLevel(long score) => _evalFashionLevel ?? FashionLevelCore(score);
 
     /// <summary>LC_InteractCondition operator table (lua :313-356): 1 ==, 2 ~=, 3 &gt;, 4 &gt;=, 5 &lt;, 6 &lt;=.</summary>
     private static bool Compare(long op, long value, long param) => op switch
@@ -431,7 +420,9 @@ public sealed class AchievementService : IGameTicker
             ? WardRobeConfig.Get(_data, id)?.Quality ?? -1 : -1;
 
     /// <summary>Lit-up costumes and owned mounts that have not expired (mount ids are WardRobeConfig ids).</summary>
-    private HashSet<long> OwnedAppearances(GameSession s)
+    private HashSet<long> OwnedAppearances(GameSession s) => _evalAppearances ?? OwnedAppearancesCore(s);
+
+    private HashSet<long> OwnedAppearancesCore(GameSession s)
     {
         long now = NowMs;
         var owned = new HashSet<long>();
@@ -447,6 +438,7 @@ public sealed class AchievementService : IGameTicker
     /// <summary>Re-reads every snapshot target; a slot only grows. Returns whether the state changed.</summary>
     private bool EvaluateSnapshots(GameSession s, DBRoleAchievementInfo state, long nowMs)
     {
+        using var _ = BeginEvalPass(s);
         bool changed = false;
         foreach (var row in Rows().Rows.Values)
         {
@@ -469,6 +461,7 @@ public sealed class AchievementService : IGameTicker
     /// <summary>Whether a snapshot re-read would change anything (the tick's cheap read-only probe).</summary>
     private bool SnapshotImproves(GameSession s)
     {
+        using var _ = BeginEvalPass(s);
         var state = s.Achievements!;
         foreach (var row in Rows().Rows.Values)
         {
@@ -733,29 +726,7 @@ public sealed class AchievementService : IGameTicker
     /// The sweep also catches sources without a hook (wardrobe and mount unlocks, pet hatching, Soul Echo slots, talent
     /// plans, a guild view changed while offline).
     /// </summary>
-    public void Tick(GameTime time)
-    {
-        if (time.Now - _lastTick < ProbeEvery) return;
-        _lastTick = time.Now;
-        var all = _sessions.All();
-        var probe = new HashSet<GameSession>(_dirty);
-        _dirty.Clear();
-        if (all.Count > 0)
-        {
-            int slice = (all.Count + SweepSlices - 1) / SweepSlices;
-            for (int i = 0; i < slice; i++) probe.Add(all[(_sweepIndex + i) % all.Count]);
-            _sweepIndex = (_sweepIndex + slice) % all.Count;
-        }
-        if (probe.Count == 0) return;
-        long day = DayBoundary();
-        foreach (var s in probe)
-        {
-            if (!Ready(s) || _recheckQueued.Contains(s)) continue;
-            if (s.Handoff != null) { _dirty.Add(s); continue; }
-            if (s.AchievementRuntime!.LastLoginDay < day) QueueLoginDay(s);
-            else if (SnapshotImproves(s)) PostRecheck(s);
-        }
-    }
+    public void Tick(GameTime time) => TickOptimized(time);
 
     // ---------------------------------------------------------------- claims
 

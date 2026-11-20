@@ -34,6 +34,15 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
     /// <summary>Replays require the entity bases installed by JoinAsync.</summary>
     public List<Func<GameSession, Task>> AfterLoaded { get; } = [];
     private readonly HashSet<Func<GameSession, Task>> _ownedAfterLoaded = [];
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, PreparedMessage> _npcViews = new();
+
+    private PreparedMessage NpcView(long sceneEntry, MapWorld map) =>
+        _npcViews.GetOrAdd(sceneEntry, _ =>
+        {
+            var view = new AoIViewChangeData();
+            foreach (var npc in map.Npcs) view.Bases.Add(NpcEntity(npc));
+            return new PreparedMessage(GameAoiSink.SyncAoiView, view);
+        });
     /// <summary>Shared keys a loaded hook writes for this session (a hook that writes beyond the role declares them
     /// here when it registers).</summary>
     public List<Func<GameSession, Ownership.ReservationKey[]>> LoadedKeys { get; } = [];
@@ -280,9 +289,7 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
                 s.ReconnectAoiPending = false;
                 if (worldData.Map(s.SceneEntry) is { Npcs.Count: > 0 } map)
                 {
-                    var view = new AoIViewChangeData();
-                    foreach (var npc in map.Npcs) view.Bases.Add(NpcEntity(npc));
-                    await s.SendGameAsync(GameAoiSink.SyncAoiView, view);
+                    await s.SendPreparedAsync(NpcView(s.SceneEntry, map));
                     if (!CurrentScene() || s.SceneLoading) return;
                 }
                 else if (reconnectAoi)
@@ -335,10 +342,10 @@ public sealed partial class SceneService(IOptions<ServerOptions> options, World 
         if (!current()) return;
         if (s.Buffs.Count > 0) await buffs.ResendAsync(s);
         if (!current()) return;
-        var view = new AoIViewChangeData();
         if (worldData.Map(s.SceneEntry) is { Npcs.Count: > 0 } map)
-            foreach (var npc in map.Npcs) view.Bases.Add(NpcEntity(npc));
-        await s.SendGameAsync(GameAoiSink.SyncAoiView, view);
+            await s.SendPreparedAsync(NpcView(s.SceneEntry, map));
+        else
+            await s.SendGameAsync(GameAoiSink.SyncAoiView, new AoIViewChangeData());
         if (!current()) return;
         await world.ReplayViewAsync(s, current);
         foreach (var handler in Resync)

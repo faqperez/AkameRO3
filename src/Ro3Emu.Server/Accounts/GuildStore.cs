@@ -239,11 +239,12 @@ public sealed class GuildStore(AccountStore accounts)
     private long _cachedGeneration = -1;
     private readonly Dictionary<long, (byte[] Json, OwnerRevisionValue? Revision)?> _byId = [];
     private readonly Dictionary<long, long> _guildOfRole = [];
+    private List<(byte[] Json, OwnerRevisionValue? Revision)>? _allGuilds;
 
     private long Current()
     {
         long generation = _accounts.Caches.Current(WrittenCache.Guild);
-        if (_cachedGeneration != generation) { _byId.Clear(); _guildOfRole.Clear(); _cachedGeneration = generation; }
+        if (_cachedGeneration != generation) { _byId.Clear(); _guildOfRole.Clear(); _allGuilds = null; _cachedGeneration = generation; }
         return generation;
     }
 
@@ -288,7 +289,23 @@ public sealed class GuildStore(AccountStore accounts)
         if (events.Length > 0) transaction.Add(new GuildEventAppendPlan(guildId, "", events, JournalCap));
     }
 
-    public IReadOnlyList<State> List() => _accounts.ReadSync<List<State>>(new GuildReadPlan(GuildReadKind.List));
+    public IReadOnlyList<State> List()
+    {
+        lock (_cacheLock)
+        {
+            Current();
+            if (_allGuilds != null) return [.. _allGuilds.Select(Copy)];
+        }
+        long generation = _accounts.Caches.Current(WrittenCache.Guild);
+        var list = _accounts.ReadSync<List<State>>(new GuildReadPlan(GuildReadKind.List));
+        lock (_cacheLock)
+            if (Current() == generation)
+            {
+                _allGuilds = [.. list.Select(Cache)];
+                foreach (var state in list) _byId[state.Id] = Cache(state);
+            }
+        return list;
+    }
 
     public bool NameExists(string name, long exceptId = 0) =>
         _accounts.ReadSync<bool>(new GuildReadPlan(GuildReadKind.NameExists, exceptId, name));

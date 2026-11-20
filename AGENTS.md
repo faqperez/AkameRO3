@@ -62,3 +62,9 @@ client cannot establish is marked `(inferred)` where it is implemented. Never pr
   credentials, logs with personal data.
 - Commit messages: a short imperative subject in English, an optional body that explains why. No tool attribution
   trailers.
+
+## AkameRO3 Custom Architecture & Upstream-Friendly Rules
+
+- **Estrategia Upstream-Friendly (Mínimo Diff):** Prohibido reformatear archivos existentes o mover código de lugar innecesariamente. Encapsular toda lógica nueva en carpetas/archivos propios (ej. `Custom/` o clases `partial`) con puntos de enganche mínimos en los archivos del emulador original para que `git rebase upstream/main` sea limpio.
+- **Concurrencia Segura en .NET 10:** Respetar el principio Single-Writer del `GameLoop` y de SQLite WAL. Prohibido compartir colecciones mutables entre hilos o usar `lock` anidados; toda comunicación asíncrona hacia el `GameLoop` debe pasar por colas thread-safe (`Channel<T>` / `ConcurrentQueue<T>`) con mensajes inmutables.
+- **Criterio de Aceptación Medible:** Ninguna optimización se considera terminada sin correr la suite de tests (`dotnet test`) y validar con `Ro3Emu.LoadTest` (`S2` y `S5`) una mejora real en `tick p50`, `tick p99` y `busyRatio`.

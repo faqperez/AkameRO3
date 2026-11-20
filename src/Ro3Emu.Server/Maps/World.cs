@@ -338,6 +338,7 @@ public sealed partial class World(IAoiSink sink, GameLoop loop, ILogger<World> l
             members.Add(session);
             Index(session);
         }
+        if (_maps.TryGetValue(session.WorldScene, out var joinedMap)) joinedMap.Wake();
         log.LogInformation("{Name} joins scene {Scene}; sees {Count}", session.Role?.Name, session.SceneEntry, session.Visible.Count);
         foreach (var (viewer, subject) in enters) await EnterPlayerAsync(viewer, subject);
         if (session.PetActor is { } pet) await EnterPetAsync(session, pet);
@@ -718,6 +719,11 @@ public sealed partial class World(IAoiSink sink, GameLoop loop, ILogger<World> l
     public IReadOnlyList<GameSession> PlayersIn(long sceneEntry)
     {
         lock (_sync) return _scenes.TryGetValue(sceneEntry, out var members) ? members.ToList() : [];
+    }
+
+    internal bool HasPlayers(long sceneEntry)
+    {
+        lock (_sync) return _scenes.TryGetValue(sceneEntry, out var members) && members.Count > 0;
     }
 
     /// <summary>Release an empty private instance and its ticker after its owner leaves.</summary>

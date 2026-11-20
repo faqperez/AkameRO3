@@ -72,7 +72,8 @@ public sealed class RoleSnapshots
     {
         public readonly RoleSnapshot Snapshot = snapshot;
         public readonly Dictionary<string, byte[]?> Blobs = new(snapshot.Blobs, StringComparer.Ordinal);
-        public bool Progress = snapshot.Progress != null, Items = snapshot.Items != null, Identity = snapshot.Identity != null;
+        public bool Progress = snapshot.Progress != null, Items = snapshot.Items != null, Identity = snapshot.Identity != null,
+            RevisionVector = snapshot.Progress?.SourceRevision != null;
     }
 
     private readonly object _gate = new();
@@ -201,6 +202,7 @@ public sealed class RoleSnapshots
     private static void Drop(Entry entry, string part)
     {
         entry.Identity = false;
+        entry.RevisionVector = false;
         if (part == RevisionStore.Inventory) { entry.Items = false; return; }
         if (part == RevisionStore.Progress || ProgressColumns.Contains(part))
         {
@@ -276,6 +278,19 @@ public sealed class RoleSnapshots
         }
         Interlocked.Increment(ref _served);
         return true;
+    }
+
+    internal bool TryRevisionVector(long role, out RoleRevisionVector? vector)
+    {
+        lock (_gate)
+        {
+            vector = null;
+            if (!_installed.TryGetValue(role, out var entry) || !entry.RevisionVector || entry.Snapshot.Progress?.SourceRevision is not { } src)
+                return false;
+            vector = new RoleRevisionVector(src.RoleId, src.Epoch, src.Deleted,
+                new Dictionary<string, long>(src.Parts, StringComparer.Ordinal));
+            return true;
+        }
     }
 
     public object Snapshot()

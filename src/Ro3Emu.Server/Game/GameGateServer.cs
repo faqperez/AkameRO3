@@ -63,7 +63,13 @@ public sealed class GameGateServer(
             // Game state lives on the game loop; the reader waits, so one connection's messages stay in order.
             case ConnectServer:
                 var connect = ConnectServerReq.Parser.ParseFrom(body.Span);
-                await loop.InvokeAsync(() => OnConnectServerAsync(session, connect));
+                string? resolvedAccount = null;
+                if (session.Channel.Encrypted && connect.Type is ConnectServerReq.Types.ReqType.NewConnection or ConnectServerReq.Types.ReqType.SwitchToAccount && connect.HasToken)
+                {
+                    var token = MessagePackSerializer.Deserialize<Dictionary<string, object?>>(connect.Token.Memory, Micro.MicroServiceRouter.Untrusted);
+                    resolvedAccount = await accounts.ResolveEngineSignAsync(token.GetValueOrDefault("Sign") as string);
+                }
+                await loop.InvokeAsync(() => OnConnectServerAsync(session, connect, resolvedAccount));
                 break;
 
             case EntityMessageIn:
@@ -85,7 +91,7 @@ public sealed class GameGateServer(
     /// Account stage (spec §4): Connected, then the ClientAccount entity, then OnQueueFinishedNotify — that RPC (not the
     /// connect result) is what makes Lua enter the role-select scene.
     /// </summary>
-    private async Task OnConnectServerAsync(GameSession session, ConnectServerReq request)
+    private async Task OnConnectServerAsync(GameSession session, ConnectServerReq request, string? resolvedAccount = null)
     {
         var type = request.Type;
         // connectServer only after the encryption handshake.
@@ -104,12 +110,12 @@ public sealed class GameGateServer(
             await reconnects.ReconnectAsync(session, request);
             return;
         }
-        string? account = null;
-        if (type is ConnectServerReq.Types.ReqType.NewConnection or ConnectServerReq.Types.ReqType.SwitchToAccount && request.HasToken)
+        string? account = resolvedAccount;
+        if (account == null && type is ConnectServerReq.Types.ReqType.NewConnection or ConnectServerReq.Types.ReqType.SwitchToAccount && request.HasToken)
         {
             // GameClient.Token = the msgpack MixedLoginToken from LoginService.verifySdk.
             var token = MessagePackSerializer.Deserialize<Dictionary<string, object?>>(request.Token.Memory, Micro.MicroServiceRouter.Untrusted);
-            account = accounts.ResolveEngineSign(token.GetValueOrDefault("Sign") as string);
+            account = await accounts.ResolveEngineSignAsync(token.GetValueOrDefault("Sign") as string);
         }
         Log.LogInformation("GameGate: {Remote} connectServer {Type} account={Account}", session.Channel.Remote, type, account ?? "?");
         if (account == null || (type == ConnectServerReq.Types.ReqType.SwitchToAccount && account != session.Account))

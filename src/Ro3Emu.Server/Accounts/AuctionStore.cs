@@ -65,7 +65,15 @@ public sealed class AuctionStore(AccountStore accounts)
 
     /// <summary>Every lot not settled yet: what the sweep, the market and the prebuys work on.</summary>
     public IReadOnlyList<Item> OpenItems()
-        => _accounts.ReadSync<List<Item>>(new AuctionReadPlan(AuctionReadKind.Open));
+    {
+        long generation = _accounts.Caches.Current(WrittenCache.Auction);
+        lock (_cacheLock)
+            if (_openItems.Generation == generation && _openItems.Items != null) return _openItems.Items;
+        var items = _accounts.ReadSync<List<Item>>(new AuctionReadPlan(AuctionReadKind.Open));
+        lock (_cacheLock)
+            if (_accounts.Caches.Current(WrittenCache.Auction) == generation) _openItems = (generation, items);
+        return items;
+    }
 
     /// <summary>Every lot of one auction type, settled ones included. Shared instances for reading only: never mutate or
     /// save them (read the lot again with <see cref="Get"/> for that).</summary>
@@ -84,6 +92,9 @@ public sealed class AuctionStore(AccountStore accounts)
     // only writer of these rows, bumps the generation after its job; a read during which it changed is not cached.
     private readonly object _cacheLock = new();
     private readonly Dictionary<AuctionType, (long Generation, IReadOnlyList<Item> Items)> _ofType = [];
+    private (long Generation, IReadOnlyList<Item>? Items) _openItems = (-1, null);
+    private (long Generation, IReadOnlyList<Prebuy>? Items) _pendingPrebuys = (-1, null);
+    private (long Generation, IReadOnlyList<Run>? Items) _pendingRuns = (-1, null);
 
     /// <summary>Settled lots of one type, latest end first.</summary>
     public IReadOnlyList<Item> SettledItems(AuctionType type)
@@ -160,10 +171,27 @@ public sealed class AuctionStore(AccountStore accounts)
     }
 
     public IReadOnlyList<Prebuy> Prebuys(bool pendingOnly = true)
-        => _accounts.ReadSync<List<Prebuy>>(new AuctionReadPlan(AuctionReadKind.Prebuys, pendingOnly: pendingOnly));
+    {
+        if (!pendingOnly) return _accounts.ReadSync<List<Prebuy>>(new AuctionReadPlan(AuctionReadKind.Prebuys, pendingOnly: false));
+        long generation = _accounts.Caches.Current(WrittenCache.Auction);
+        lock (_cacheLock)
+            if (_pendingPrebuys.Generation == generation && _pendingPrebuys.Items != null) return _pendingPrebuys.Items;
+        var items = _accounts.ReadSync<List<Prebuy>>(new AuctionReadPlan(AuctionReadKind.Prebuys, pendingOnly: true));
+        lock (_cacheLock)
+            if (_accounts.Caches.Current(WrittenCache.Auction) == generation) _pendingPrebuys = (generation, items);
+        return items;
+    }
 
     public IReadOnlyList<Run> PendingRuns()
-        => _accounts.ReadSync<List<Run>>(new AuctionReadPlan(AuctionReadKind.PendingRuns));
+    {
+        long generation = _accounts.Caches.Current(WrittenCache.Auction);
+        lock (_cacheLock)
+            if (_pendingRuns.Generation == generation && _pendingRuns.Items != null) return _pendingRuns.Items;
+        var runs = _accounts.ReadSync<List<Run>>(new AuctionReadPlan(AuctionReadKind.PendingRuns));
+        lock (_cacheLock)
+            if (_accounts.Caches.Current(WrittenCache.Auction) == generation) _pendingRuns = (generation, runs);
+        return runs;
+    }
 
     internal AuctionRunSnapshot GetRunSnapshot(long id)
         => _accounts.ReadSync<AuctionRunSnapshot>(new AuctionReadPlan(AuctionReadKind.RunSnapshot, id));

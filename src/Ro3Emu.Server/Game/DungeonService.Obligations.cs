@@ -396,7 +396,7 @@ public sealed partial class DungeonService
     public async Task DeliverPendingAsync(GameSession s)
     {
         if (s.Role == null || s.Dungeons == null) return;
-        foreach (var row in _obligations.Pending(s.Role.Id))
+        foreach (var row in await _obligations.PendingAsync(s.Role.Id))
         {
             // Inside the role select only the obligations it reserved are delivered; one frozen after its admission
             // stays durable and pending for the next entry or login.

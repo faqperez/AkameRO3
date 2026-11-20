@@ -123,7 +123,7 @@ public sealed partial class TowerService
     }
 
     private JsonElement? Floor(long id) => Floors().Where(r => GameData.Int(r, "_iID") == id).Select(r => (JsonElement?)r).FirstOrDefault();
-    private int Cleared(GameSession s) => Floor(s.Tower!.LayerConfID) is { } f ? (int)GameData.Int(f, "_iFloor") : 0;
+    private int Cleared(GameSession s) => s.Tower!.LayerConfID > 0 && Floor(s.Tower.LayerConfID) is { } f ? (int)GameData.Int(f, "_iFloor") : 0;
 
     /// <summary>The highest Spirit Tower floor this role has cleared (PetFloorConfig._iFloor of its record), 0 without one.</summary>
     public int HighestClearedFloor(GameSession s) => s.Tower == null ? 0 : Cleared(s);

@@ -697,13 +697,35 @@ public sealed class WildAfkService : IGameTicker
 
     private readonly HashSet<State> _pendingReconciles = [];
     internal Action<GameSession>? TickAttemptCompletedForTest { get; set; }
+    private bool NeedsTickReconcile(GameSession s, State state, long now)
+    {
+        if (TickAttemptCompletedForTest != null || state.Persisted == null || state.SyncedInfo == null || _lazySave.IsDirty(s))
+            return true;
+        var info = state.Info;
+        if (info.IsHighMagnification && !info.IsSuspended) return true;
+        if (Epoch(now) > state.DailyEpoch || (info.HighMultiplierTimeSeconds <= 0 && info.IsHighMagnification)) return true;
+        string reason = InactiveReason(s, now);
+        bool shouldSuspend = info.IsHighMagnification && reason != "active";
+        if (info.IsSuspended != shouldSuspend || (info.IsSuspended && reason.Length > 0 && reason != state.LastReason))
+            return true;
+        if (PendingDailyAward(state, s.Daily, s.Tasks, s.DailyRows)) return true;
+        state.AccountedAtMs = Math.Max(state.AccountedAtMs, now);
+        state.LastReason = reason;
+        return false;
+    }
+
     public void Tick(GameTime time)
     {
         // Still every session once a second (accrual and suspension follow the clock), each in its own tick.
         if (_phases.Due(time.Now) is not { } due) return;
+        long now = Now;
         foreach (var s in _sessions.All().Where(s => s.Role != null && s.WildAfk != null && due[SecondPhases.PhaseOf(s)]).ToArray())
         {
+            if (TickAttemptCompletedForTest == null
+                && s.Owner?.State is Ownership.RoleOwnerState.Loading or Ownership.RoleOwnerState.Quiescing)
+                continue;
             var state = s.WildAfk!;
+            if (!NeedsTickReconcile(s, state, now)) continue;
             if (!_pendingReconciles.Add(state)) continue;
             var role = s.Role;
             var attachment = s.Attachment;

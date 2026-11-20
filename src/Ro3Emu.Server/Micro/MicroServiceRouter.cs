@@ -76,7 +76,7 @@ public sealed partial class MicroServiceRouter(IEnumerable<IMicroService> servic
             // answer from options alone. PartyService only reads: it goes to the loop itself for the team and tavern
             // directories (their owner) and to the read pool for chat groups, and changes nothing.
             if (loop == null || owners == null || service is "FriendService" or "UserDataService" or "MailService" or "PhonestGate"
-                or "RankService" or "NameService" or "ClusterRecommendService" or "PlatformProxyService" or "PartyService")
+                or "RankService" or "NameService" or "ClusterRecommendService" or "PlatformProxyService" or "PartyService" or "LoginService")
                 result = await handler.InvokeAsync(session, method, args);
             else result = await loop.InvokeAsync(async () =>
             {

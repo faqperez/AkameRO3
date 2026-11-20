@@ -160,7 +160,9 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
         try
         {
             if (!SelectionAvailable(session)) return;
-            await SelectPreparedRoleAsync(session, req);
+            var prebuilt = await PrepareRoleOffLoopAsync(role, session.ClientAccount);
+            if (!SelectionAvailable(session)) return;
+            await SelectPreparedRoleAsync(session, req, prebuilt);
         }
         finally
         {
@@ -194,7 +196,9 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
     {
         while (true)
         {
-            var scope = await owners.EnterAsync("role select", await LoginReservationAsync(roleId, account));
+            var keys = await LoginReservationAsync(roleId, account);
+            if (owners.TryEnter("role select", keys) is { } fast) return fast;
+            var scope = await owners.EnterAsync("role select", keys);
             try
             {
                 if (owners.Reservations.Covers(scope.Context.Operation, await LoginReservationAsync(roleId, account))) return scope;
@@ -204,7 +208,7 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
         }
     }
 
-    private async Task SelectPreparedRoleAsync(GameSession session, AccountLoginSelectRoleReq req)
+    private async Task SelectPreparedRoleAsync(GameSession session, AccountLoginSelectRoleReq req, PreparedRoleLogin prebuilt)
     {
         Role? role;
         var owners = session.Owners ?? throw new InvalidOperationException("Selection has no owner registry.");
@@ -227,13 +231,12 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
                 if (SelectionPhaseForTest is { } beforeAttach)
                     await beforeAttach("BeforeAttach", session);
                 if (!SelectionAvailable(session)) return;
-                await roles.TouchLoginAsync(role.Id);
-                if (!SelectionAvailable(session)) return;
                 session.ClearRoleLoadState();
                 session.Role = role;
                 owners.BindLegacySelection(session);
                 lease = session.Attachment!;
                 session.InstanceId = 0;
+                await roles.TouchLoginAsync(role.Id);
                 if (SelectionPhaseForTest is { } afterBind)
                     await afterBind("AfterBindBeforeLoad", session);
                 EnsureSelection(session, lease);
@@ -241,8 +244,8 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
                 roles.BeginLoginStaging(role.Id);
                 try
                 {
-                    var arrival = await InitializeSelectedRoleAsync(session, role);
-                    await PublishSelectedRoleAsync(session, role, arrival, lease);
+                    var arrival = await InitializeSelectedRoleAsync(session, role, prebuilt);
+                    await PublishSelectedRoleAsync(session, role, arrival, lease, prebuilt);
                     await roles.CommitLoginStagingAsync(role.Id);
                 }
                 finally { roles.FlushLoginStaging(role.Id); } // a failed or cancelled selection keeps what it staged
@@ -263,7 +266,7 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
         }
     }
 
-    private async Task<Maps.MapPoint> InitializeSelectedRoleAsync(GameSession session, Role role)
+    private async Task<Maps.MapPoint> InitializeSelectedRoleAsync(GameSession session, Role role, PreparedRoleLogin prebuilt)
     {
         deadlines.Attach(session);
         session.SkillPlans = null; // each selected role loads its own 5025 state
@@ -271,7 +274,8 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
         session.Lottery = null;
         session.LotteryDay = 0;
         session.Training = null;
-        var arrival = scene.LoginPoint(role.SceneEntry, new Vec3 { X = role.X, Y = role.Y, Z = role.Z }, role.Face);
+        var arrival = SamePlacement(role, prebuilt.SourceRole)
+            ? prebuilt.Arrival : scene.LoginPoint(role.SceneEntry, new Vec3 { X = role.X, Y = role.Y, Z = role.Z }, role.Face);
         session.SceneRecoveryRequired = false;
         session.Handoff = null;
         session.LineNumber = 1;
@@ -281,7 +285,8 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
         session.Face = arrival.Face;
         session.RolePositionReady = true;
         session.LastWalkUtc = DateTime.UtcNow;
-        session.Speed = data.JobAttributes(role.Career).GetValueOrDefault(AttrSpeed, DefaultSpeed);
+        session.Speed = role.Career == prebuilt.SourceRole.Career
+            ? prebuilt.Speed : data.JobAttributes(role.Career).GetValueOrDefault(AttrSpeed, DefaultSpeed);
         session.PositionSavedUtc = DateTime.UtcNow;
         session.DeferFunctionSync = true;
         session.DeferTaskSync = true;
@@ -309,7 +314,7 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
     }
 
     private async Task PublishSelectedRoleAsync(GameSession session, Role role, Maps.MapPoint arrival,
-        Ownership.AttachmentLease lease)
+        Ownership.AttachmentLease lease, PreparedRoleLogin prebuilt)
     {
         if (SelectionPhaseForTest is { } beforePublish)
             await beforePublish("BeforePublish", session);
@@ -319,7 +324,7 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
             Result = 0,
             RoleAssets = new RoleAssets
             {
-                BasicInfo = RoleProto.BaseInfo(role, session.ClientAccount),
+                BasicInfo = SameIdentity(role, prebuilt.SourceRole) ? prebuilt.BaseInfo : RoleProto.BaseInfo(role, session.ClientAccount),
                 ServerTimeMs = NowMs(),
                 ServerInfo = new ServerBasicInfo
                 {
@@ -336,12 +341,12 @@ public sealed partial class RoleSessionService(RoleStore roles, Data.GameData da
         EnsureSelection(session, lease);
 
         // Saved client settings (intro skipped, control mode, key bindings...) via the generic DB increment sync.
-        session.Settings = LoadSettings(role.Id); // C/D 17: kept on the session, merged and written lazily from now on
+        session.Settings = prebuilt.Settings; // C/D 17: kept on the session, merged and written lazily from now on
         session.SettingsPart = null;
-        if (RepairClassicMovement(session.Settings)) settings.MarkDirty(session, urgent: false);
-        await session.SendGameAsync(MsgId.AutoSyncSettings, SettingsSync(session.Settings));
+        if (prebuilt.SettingsRepaired) settings.MarkDirty(session, urgent: false);
+        await session.SendPreparedAsync(prebuilt.SettingsMessage);
         EnsureSelection(session, lease);
-        await systems.LoginAsync(session, () => EnsureSelection(session, lease));
+        await systems.LoginAsync(session, () => { EnsureSelection(session, lease); roles.BeginLoginStaging(role.Id); });
 
         await friends.OnlineChangedAsync(role.Id, online: true);
         EnsureSelection(session, lease);

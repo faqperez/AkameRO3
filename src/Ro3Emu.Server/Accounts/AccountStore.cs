@@ -366,6 +366,8 @@ public sealed partial class AccountStore : IDisposable
     private RoleRevisionVector ReadVector(long role, bool overtaken)
     {
         long marks = _unrecordedCommits.GetValueOrDefault(role);
+        if (!overtaken && marks == 0 && Snapshots.TryRevisionVector(role, out var snapshot) && snapshot != null)
+            return snapshot;
         var read = ReadSync<RoleRevisionVector>(new RoleRevisionReadPlan(role));
         if ((overtaken || marks != 0) && _loop?.IsOnLoop == true && _loop.Owners?.Cached(role) is { } owner
             && (overtaken || owner.State is Game.Ownership.RoleOwnerState.Attached or Game.Ownership.RoleOwnerState.Loading)
@@ -424,7 +426,8 @@ public sealed partial class AccountStore : IDisposable
     {
         if (_loop?.IsOnLoop != true || _loop.Owners?.Cached(role) is not { } owner) return null;
         if (_unrecordedCommits.ContainsKey(role)) return null;
-        if (owner.State is not (Game.Ownership.RoleOwnerState.Attached or Game.Ownership.RoleOwnerState.Loading)
+        if (owner.State is not (Game.Ownership.RoleOwnerState.Attached or Game.Ownership.RoleOwnerState.Loading
+            or Game.Ownership.RoleOwnerState.Quiescing)
             || owner.Revisions.Count == 0) return null;
         VectorCacheHits++;
         return new RoleRevisionVector(role, owner.LifecycleEpoch, false, owner.Revisions);

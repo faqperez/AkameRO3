@@ -167,7 +167,7 @@ public sealed class RoleSystems(Maps.World world, ChatService chat, CharacterSer
     /// <summary>The keys the login steps write besides the role, its account and lifecycle.</summary>
     internal async Task<Ownership.ReservationKey[]> LoginKeysAsync(long roleId) =>
         [.. defense.LoginKeys(roleId), .. activities.LoginKeys(roleId), .. territory.LoginKeys(),
-         .. caravan.LoginKeys(roleId), .. guildChallenge.LoginKeys(roleId),
+         .. await caravan.LoginKeysAsync(roleId), .. guildChallenge.LoginKeys(roleId),
          .. await mvps.LoginKeysAsync(roleId), .. await dungeons.LoginKeysAsync(roleId),
          .. await casual.LoginKeysAsync(roleId), .. await timedBattles.LoginKeysAsync(roleId)];
 

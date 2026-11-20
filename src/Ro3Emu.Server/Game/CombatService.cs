@@ -1159,7 +1159,9 @@ public sealed partial class CombatService : IGameTicker
             long first = _regenSlot < 0 ? slot : Math.Max(_regenSlot + 1, slot - slots + 1);
             _regenSlot = slot;
             foreach (var s in _sessions.All())
-                if (s.Role != null)
+                if (s.Role != null && s.Progress != null && !s.Dead && now >= s.NoRegenUntilMs
+                    && (s.CurrentHp != null || s.CurrentSp != null)
+                    && s.Owner?.State is not (Ownership.RoleOwnerState.Loading or Ownership.RoleOwnerState.Quiescing))
                 {
                     long phase = (s.Role.Id % slots + slots) % slots;
                     for (long k = first; k <= slot; k++)
@@ -1175,16 +1177,22 @@ public sealed partial class CombatService : IGameTicker
     /// </summary>
     private async Task RegenAsync(GameSession s)
     {
-        if (s.Role == null || s.Progress == null) return;
-        using var held = await CharacterService.Lock(s);
         if (s.Role == null || s.Progress == null || s.Dead || Now < s.NoRegenUntilMs) return;
         if (s.CurrentHp == null && s.CurrentSp == null) return; // unset = full (CharacterService.Stats): nothing to restore
-        var st = _character.Stats(s);
-        if (st[2000] >= st[101] && st[2001] >= st[102]) return;
-        long rehp = st[107] + st[101] * st.Data.GetValueOrDefault(1071) / 10000;
-        // 243 temporary_per_magicrecover: Meditatio "MP Recovery Speed", as 1081 per_resp beside it.
-        long resp = st[108] + st[102] * (st.Data.GetValueOrDefault(1081) + st.Data.GetValueOrDefault(243)) / 10000;
-        await _character.SetHpSpAsync(s, st[2000] + Math.Max(1, rehp), st[2001] + Math.Max(1, resp));
+        IDisposable held;
+        try { held = await CharacterService.Lock(s); }
+        catch (OperationCanceledException) { return; }
+        using (held)
+        {
+            if (s.Role == null || s.Progress == null || s.Dead || Now < s.NoRegenUntilMs) return;
+            if (s.CurrentHp == null && s.CurrentSp == null) return;
+            var st = _character.Stats(s);
+            if (st[2000] >= st[101] && st[2001] >= st[102]) return;
+            long rehp = st[107] + st[101] * st.Data.GetValueOrDefault(1071) / 10000;
+            // 243 temporary_per_magicrecover: Meditatio "MP Recovery Speed", as 1081 per_resp beside it.
+            long resp = st[108] + st[102] * (st.Data.GetValueOrDefault(1081) + st.Data.GetValueOrDefault(243)) / 10000;
+            await _character.SetHpSpAsync(s, st[2000] + Math.Max(1, rehp), st[2001] + Math.Max(1, resp));
+        }
     }
 
     private async Task ToPlayerAndViewersAsync(GameSession p, uint msgId, IMessage body)

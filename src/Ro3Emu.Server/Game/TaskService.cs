@@ -157,6 +157,9 @@ public sealed partial class TaskService
             while (info.CompleteNum.Count < slots) info.CompleteNum.Add(0);
             while (info.CompleteNum.Count > slots) info.CompleteNum.RemoveAt(info.CompleteNum.Count - 1);
         }
+        if (LoadFriendCount is { } load && session.Attachment is { } attachment && await load(session) is { } count
+            && ReferenceEquals(session.Attachment, attachment))
+            _friendCounts.AddOrUpdate(attachment, new System.Runtime.CompilerServices.StrongBox<long>(count));
         CountLogin(session); // 106801, before this login's acceptances (they start at 1)
         AcceptReady(session);
         EvaluatePassive(session);
@@ -166,7 +169,6 @@ public sealed partial class TaskService
         if (!session.DeferTaskSync) await SyncTasksAsync(session);
         // Deliveries found at login (e.g. a level target already met) are handled like any other change.
         await SettleAsync(session);
-        QueueFriendCount(session); // 103019 reads the friend list, which is not loaded here
         if (AfterLoginSettlementForTest is { } afterLogin) await afterLogin(session);
     }
 
@@ -707,9 +709,9 @@ public sealed partial class TaskService
         StartMiscTargets(session, id);
         // Same current-step selection as LC_TaskHelper.DealAcception (inferred for server host).
         // Extra slots are retained, never treated as sequential instructions.
-        EvaluatePassive(session);
         var def = Defs()[id];
         var info = session.Tasks.Infos[id];
+        EvaluatePassive(session, def, info);
         int step = Enumerable.Range(0, def.Targets.Length).FirstOrDefault(i => info.CompleteNum[i] != Required(session, def.Targets[i]), -1);
         if (step >= 0 && step < def.AcceptActions.Length && ServerOpcode(def.AcceptActions[step]) == 621) session.InCutScene = true;
         // The 53 hidden Connect quests start together at login; at Information they would fill a /bug report's context.
@@ -735,16 +737,18 @@ public sealed partial class TaskService
     private void EvaluatePassive(GameSession session)
     {
         foreach (var info in session.Tasks!.Infos.Values.Where(i => i.Status is Running or Finished))
+            EvaluatePassive(session, Defs()[info.TaskId], info);
+    }
+
+    private void EvaluatePassive(GameSession session, TaskDef def, TaskInfo info)
+    {
+        for (int i = 0; i < def.Targets.Length && i < info.CompleteNum.Count; i++)
         {
-            var def = Defs()[info.TaskId];
-            for (int i = 0; i < def.Targets.Length && i < info.CompleteNum.Count; i++)
-            {
-                var t = def.Targets[i];
-                if (!Supported(t)) { info.CompleteNum[i] = 0; continue; }
-                long value = TavernStay(session, def, t) is var stay and >= 0 ? stay : PassiveValue(session, t);
-                if (value < 0) continue;
-                info.CompleteNum[i] = Math.Min(Required(session, t), value);
-            }
+            var t = def.Targets[i];
+            if (!Supported(t)) { info.CompleteNum[i] = 0; continue; }
+            long value = TavernStay(session, def, t) is var stay and >= 0 ? stay : PassiveValue(session, t);
+            if (value < 0) continue;
+            info.CompleteNum[i] = Math.Min(Required(session, t), value);
         }
     }
 

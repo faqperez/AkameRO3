@@ -258,6 +258,7 @@ public sealed partial class EmblemService
     internal static Dictionary<long, long> Resonances(IEnumerable<InvItem> worn, GameData data)
     {
         var marks = MarkCounts(worn, data);
+        if (marks.Count == 0) return [];
         var stages = new Dictionary<long, long>();
         foreach (var row in data.Table("EmblemMarkConfig").Values)
         {

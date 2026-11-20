@@ -101,7 +101,8 @@ public sealed class RoleStore(AccountStore accounts)
 
     /// <summary>Durable lifecycle epoch and storage-part revisions for a staged role operation.</summary>
     public RoleRevisionVector ReadRevisionVector(long roleId) =>
-        _accounts.ReadSync<RoleRevisionVector>(new RoleRevisionReadPlan(roleId));
+        _accounts.Snapshots.TryRevisionVector(roleId, out var snapshot) && snapshot != null
+            ? snapshot : _accounts.ReadSync<RoleRevisionVector>(new RoleRevisionReadPlan(roleId));
 
     public Task<RoleRevisionVector> ReadRevisionVectorAsync(long roleId) =>
         _accounts.ReadAsync<RoleRevisionVector>(new RoleRevisionReadPlan(roleId));

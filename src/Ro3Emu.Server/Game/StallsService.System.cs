@@ -101,10 +101,14 @@ public sealed partial class StallsService
         }
     }
 
+    private long _maintainedVersion = -1, _nextDueSec;
+    private int _maintainedScenesCount = -1, _maintainedLinesCount = -1;
+
     /// <summary>Run the maintenance now, including this session's scene (stall commands act on fresh state).</summary>
     public Task RefreshWorldAsync(GameSession s)
     {
         RequestScene(s);
+        _maintainedVersion = -1;
         return RefreshWorldMaintenanceAsync();
     }
 
@@ -118,15 +122,26 @@ public sealed partial class StallsService
     }
 
     /// <summary>Use captured scene values only; timed settlement belongs to its own owner plan.</summary>
-    internal Task RefreshWorldMaintenanceAsync() => RefreshWorldCoreAsync(new HashSet<long>(_maintenanceScenes));
+    internal Task RefreshWorldMaintenanceAsync()
+    {
+        if (_market.Version == _maintainedVersion && _maintenanceScenes.Count == _maintainedScenesCount
+            && _activeLines.Count == _maintainedLinesCount && Now < _nextDueSec)
+            return Task.CompletedTask;
+        return RefreshWorldCoreAsync(new HashSet<long>(_maintenanceScenes));
+    }
 
     private async Task RefreshWorldCoreAsync(IReadOnlySet<long> sceneEntries)
     {
+        long versionBefore = _market.Version;
+        int scenesBefore = sceneEntries.Count;
+        int linesBefore = _activeLines.Count;
+        long nextDue = long.MaxValue;
         var changed = new List<StallRow>();
         var restore = new List<StallRow>();
         var pins = new List<StallRow>();
         int code = await _market.RunMaintenanceAsync(tx =>
         {
+            nextDue = long.MaxValue;
             changed.Clear();
             restore.Clear();
             pins.Clear();
@@ -142,6 +157,8 @@ public sealed partial class StallsService
                 }
                 else
                 {
+                    nextDue = Math.Min(nextDue, row.Timeout);
+                    if (row.Stock.Count == 0) nextDue = Math.Min(nextDue, row.OpenTime + 360);
                     // Restore the numbered line before exposing the durable offline stall after restart.
                     pins.Add(row);
                     var meta = Metadata(tx, row.Owner);
@@ -156,11 +173,18 @@ public sealed partial class StallsService
             }
             PopulateSystems(tx, sceneEntries, changed);
             foreach (var row in tx.All<StallRow>(Kind).Where(r => r.SystemId > 0 && r.Timeout > Now))
+            {
+                nextDue = Math.Min(nextDue, Math.Min(row.Timeout, row.RestockTime));
                 if (_activeLines.Any(line => line.SceneEntry == row.Scene && !_actors.ContainsKey((row.Key, line.LineNumber)))
                     && changed.All(r => r.Key != row.Key)) restore.Add(row);
+            }
             return 0;
         });
         if (code != 0) return;
+        _maintainedVersion = _market.Version;
+        _maintainedScenesCount = scenesBefore;
+        _maintainedLinesCount = linesBefore;
+        _nextDueSec = nextDue;
         foreach (var row in pins)
         {
             if (!_lines.RestorePinnedLine(row.Scene, row.LineNumber))

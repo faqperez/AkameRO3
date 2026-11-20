@@ -88,12 +88,20 @@ public sealed partial class GuildCaravanService(GameData data, GuildStore guilds
 
     private SemaphoreSlim Gate(long guildId) => _gates.GetOrAdd(guildId, _ => new SemaphoreSlim(1, 1));
 
-    private ReservationKey[] Keys(long guildId, params long[] additionalRoles)
+    private ReservationKey[] Keys(long guildId, params long[] additionalRoles) =>
+        KeysFromOrders(guildId, [.. additionalRoles.Where(id => id > 0).Select(Read).OfType<State>()], additionalRoles);
+
+    private async Task<ReservationKey[]> KeysAsync(long guildId, params long[] additionalRoles)
+    {
+        var orders = (await Task.WhenAll(additionalRoles.Where(id => id > 0).Select(ReadAsync))).OfType<State>().ToArray();
+        return KeysFromOrders(guildId, orders, additionalRoles);
+    }
+
+    private ReservationKey[] KeysFromOrders(long guildId, State[] orders, long[] additionalRoles)
     {
         // Historical/unbooked pending awards can credit their original guild after a
         // membership switch. Reserve each such treasury and its projection recipients
         // before admitting the recipient role; recovery rows keep the same guild key.
-        var orders = additionalRoles.Where(id => id > 0).Select(Read).OfType<State>().ToArray();
         var guildIds = orders.Select(order => order.GuildId).Where(id => id > 0)
             .Concat(orders.SelectMany(order => order.PendingAwards
                 .Where(p => !p.GuildBooked && p.GuildId > 0).Select(p => p.GuildId)))
@@ -116,6 +124,13 @@ public sealed partial class GuildCaravanService(GameData data, GuildStore guilds
     {
         long gateId = _guilds.ForRole(roleId)?.Id ?? Read(roleId)?.GuildId ?? 0;
         return gateId == 0 ? [] : Keys(gateId, roleId);
+    }
+
+    internal async Task<ReservationKey[]> LoginKeysAsync(long roleId)
+    {
+        var order = await ReadAsync(roleId);
+        long gateId = _guilds.ForRole(roleId)?.Id ?? order?.GuildId ?? 0;
+        return gateId == 0 ? [] : KeysFromOrders(gateId, order != null ? [order] : [], [roleId]);
     }
 
     private static Task? Detaching(OwnerRegistry owners, IEnumerable<ReservationKey> keys) =>
@@ -228,6 +243,7 @@ public sealed partial class GuildCaravanService(GameData data, GuildStore guilds
         && _functions.IsOpen(s, 1320);
 
     private State? Read(long roleId) => _accounts.ReadSync<State?>(new CaravanMemberReadPlan<State>(roleId));
+    private Task<State?> ReadAsync(long roleId) => _accounts.ReadAsync<State?>(new CaravanMemberReadPlan<State>(roleId));
 
     private EconomyEnvelope MetadataEnvelope(long roleId, string kind)
     {
@@ -426,7 +442,7 @@ public sealed partial class GuildCaravanService(GameData data, GuildStore guilds
     /// <summary>Settle yesterday's connected and offline orders at 05:00, once per persisted role.</summary>
     public async Task ReconcileAllAsync()
     {
-        var roleIds = _accounts.ReadSync<List<long>>(new CaravanRoleIdsReadPlan());
+        var roleIds = await _accounts.ReadAsync<List<long>>(new CaravanRoleIdsReadPlan());
         int read = 0, sinceRest = 0;
         foreach (long roleId in roleIds)
         {
@@ -434,7 +450,7 @@ public sealed partial class GuildCaravanService(GameData data, GuildStore guilds
             // through between roles and rests between batches of rollovers, outside any guild gate.
             if (++read % SweepReadsPerYield == 0) await Task.Yield();
             if (sinceRest == SweepRolloversPerRest) { sinceRest = 0; await Task.Delay(SweepRest); }
-            var snapshot = Read(roleId);
+            var snapshot = await ReadAsync(roleId);
             if (snapshot == null || snapshot.Day == Day) continue;
             try
             {
@@ -528,7 +544,7 @@ public sealed partial class GuildCaravanService(GameData data, GuildStore guilds
         var guild = Eligible(s) ? Guild(s) : null;
         // A helper can finish an offline member's cargo just before a kick. The earned
         // requester award remains role-owned and must be delivered even when guildless.
-        long gateId = guild?.Id ?? Read(s.Role!.Id)?.GuildId ?? 0;
+        long gateId = guild?.Id ?? (await ReadAsync(s.Role!.Id))?.GuildId ?? 0;
         if (gateId == 0) return;
         using var operation = await EnterWithCharacterGateAsync("guild-caravan/login", gateId, s, s.Role!.Id);
         try

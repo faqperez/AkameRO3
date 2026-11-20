@@ -170,7 +170,7 @@ public sealed partial class TaskService
 
     private void QueueRefresh(GameSession session)
     {
-        if (session.Tasks == null || !_refreshQueued.Add(session)) return;
+        if (session.Tasks == null || session.DeferTaskSync || !_refreshQueued.Add(session)) return;
         _loop.PostOwned(session, async () => { _refreshQueued.Remove(session); await RefreshAsync(session); },
             discarded: () => _refreshQueued.Remove(session));
     }

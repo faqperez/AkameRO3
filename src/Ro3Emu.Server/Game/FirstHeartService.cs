@@ -201,6 +201,7 @@ public sealed class FirstHeartService : IGameTicker
         if (time.Now - _lastTick < ProbeEvery) return;
         _lastTick = time.Now;
         var all = _sessions.All();
+        if (_dirty.Count == 0 && all.Count == 0) return;
         var probe = new HashSet<GameSession>(_dirty);
         _dirty.Clear();
         if (all.Count > 0)
@@ -212,7 +213,7 @@ public sealed class FirstHeartService : IGameTicker
         foreach (var s in probe)
         {
             if (!Ready(s) || _queued.Contains(s)) continue;
-            if (s.Handoff != null) { _dirty.Add(s); continue; }
+            if (s.Handoff != null || s.Owner?.State == Ownership.RoleOwnerState.Loading) { _dirty.Add(s); continue; }
             var current = s.FirstHeart!;
             if (current.ActivityData.GetValueOrDefault(Type)?.IsAllTaskComplete == true) continue;
             if (!Evaluate(s, current.Clone()).Equals(current)) PostRefresh(s);

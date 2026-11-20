@@ -14,21 +14,35 @@ namespace Ro3Emu.LoadTest;
 public sealed partial class ScenarioRunner
 {
     private const long SiegeScene = 2230101;
-    private const int SiegeCity = 1001, GuildCap = 80;
+    private const int GuildCap = 80;
+    private static readonly int[] SiegeCities = [1001, 1101, 1102, 1103];
     private readonly ConcurrentDictionary<long, int> _siegeTeam = new();
 
     private async Task PrepareSiegeAsync(RunReport report, CancellationToken ct)
     {
         var actors = _actors.OrderBy(a => a.Account).ToArray();
         if (actors.Length < 4) throw new InvalidOperationException("S5 needs at least 4 bots");
-        if (actors.Length > 2 * GuildCap) throw new InvalidOperationException($"S5 fits at most {2 * GuildCap} bots (two guilds of {GuildCap})");
-        using (var gate = new SemaphoreSlim(16))
+        if (actors.Length > 2 * GuildCap * SiegeCities.Length)
+            throw new InvalidOperationException($"S5 fits at most {2 * GuildCap * SiegeCities.Length} bots");
+        using (var gate = new SemaphoreSlim(4))
             await Task.WhenAll(actors.Select(async a =>
             {
                 await gate.WaitAsync(ct);
                 try { await S3GmAsync(a, "!lvl 99", ct); } finally { gate.Release(); }
             }));
-        var leaders = new[] { actors[0], actors[1] };
+        var actorCity = new Dictionary<long, int>();
+        var chunks = actors.Chunk(2 * GuildCap).ToArray();
+        for (int c = 0; c < chunks.Length; c++)
+            await PrepareSiegeCityAsync(chunks[c], c, actorCity, ct);
+        await S3GmAsync(actors[0], "!siege open", ct);
+        await EnterSiegeRoomsAsync(actors, actorCity, ct);
+        report.S3SetupFixtures = [$"S5: {actors.Length} roles at level 99 (GM) across {chunks.Length} siege room(s) in scene {SiegeScene}"];
+    }
+
+    private async Task PrepareSiegeCityAsync(BotActor[] chunk, int cityIndex, Dictionary<long, int> actorCity, CancellationToken ct)
+    {
+        int city = SiegeCities[cityIndex];
+        var leaders = new[] { chunk[0], chunk[1] };
         var guilds = new long[2];
         for (int team = 0; team < 2; team++)
         {
@@ -37,7 +51,7 @@ public sealed partial class ScenarioRunner
             using var full = leader.Bot.Inbox.Expect(e => e.IsGame(GuildService.Full) && GuildFullInfoNtf.Parser.ParseFrom(e.Body).Guid > 0);
             await leader.Bot.SendGameAsync(GuildService.Create, new GuildCreateReq
             {
-                Name = $"S5{(char)('A' + team)}{_prefix[2..6]}",
+                Name = $"S5{(char)('A' + cityIndex * 2 + team)}{_prefix[2..6]}",
                 Icon = new GuildHeadIcon { BackgroundType = 100101, IconType = 200101 }
             });
             int result = GuildCreateResp.Parser.ParseFrom((await created.WaitAsync(TimeSpan.FromSeconds(15), ct)).Body).Result;
@@ -46,55 +60,53 @@ public sealed partial class ScenarioRunner
             using var edited = leader.Bot.Inbox.Expect(e => e.IsGame(GuildService.Edit) && GuildEditResp.Parser.ParseFrom(e.Body).Tp == 10);
             await leader.Bot.SendGameAsync(GuildService.Edit, new GuildEditReq
             {
-                Tp = (GuildEditReq.Types.EditType)10,
-                Announce = "S5", JoinLevelLimit = 0, AutoAcceptApply = true
+                Tp = (GuildEditReq.Types.EditType)10, Announce = "S5", JoinLevelLimit = 0, AutoAcceptApply = true
             });
             result = GuildEditResp.Parser.ParseFrom((await edited.WaitAsync(TimeSpan.FromSeconds(15), ct)).Body).Result;
             if (result != 0) throw new InvalidOperationException($"S5 guild auto-accept refused {result}");
         }
-        for (int i = 0; i < actors.Length; i++) _siegeTeam[actors[i].RoleId] = i % 2;
-        // Applications are sequential per guild: auto-accept joins inside the apply, and the application list is capped.
-        foreach (var member in actors.Skip(2))
+        for (int i = 0; i < chunk.Length; i++) { _siegeTeam[chunk[i].RoleId] = i % 2; actorCity[chunk[i].RoleId] = city; }
+        foreach (var member in chunk.Skip(2))
         {
-            int team = _siegeTeam[member.RoleId];
             using var applied = member.Bot.Inbox.Expect(e => e.IsGame(GuildService.Apply));
-            await member.Bot.SendGameAsync(GuildService.Apply, new GuildEnterApplyReq { GuildIds = { guilds[team] } });
+            await member.Bot.SendGameAsync(GuildService.Apply, new GuildEnterApplyReq { GuildIds = { guilds[_siegeTeam[member.RoleId]] } });
             var response = GuildEnterApplyResp.Parser.ParseFrom((await applied.WaitAsync(TimeSpan.FromSeconds(15), ct)).Body);
             int code = response.Result != 0 ? response.Result : response.ApplyResult.FirstOrDefault()?.Result ?? -1;
             if (code != 0) throw new InvalidOperationException($"S5 guild apply refused {code} for {member.Account}");
         }
-        await S3GmAsync(leaders[0], $"!siege seed {SiegeCity} {guilds[0]} {guilds[1]}", ct);
-        await S3GmAsync(leaders[0], "!siege open", ct);
+        await S3GmAsync(leaders[0], $"!siege seed {city} {guilds[0]} {guilds[1]}", ct);
+    }
+
+    private async Task EnterSiegeRoomsAsync(BotActor[] actors, Dictionary<long, int> actorCity, CancellationToken ct)
+    {
         var entry = _setupCounts.Action("siege-entry");
-        using (var gate = new SemaphoreSlim(10))
-            await Task.WhenAll(actors.Select(async actor =>
+        using var gate = new SemaphoreSlim(10);
+        await Task.WhenAll(actors.Select(async actor =>
+        {
+            await gate.WaitAsync(ct);
+            entry.Plan(); entry.Offer();
+            var sw = Stopwatch.StartNew();
+            try
             {
-                await gate.WaitAsync(ct);
-                entry.Plan(); entry.Offer();
-                var sw = Stopwatch.StartNew();
-                try
+                using var reply = actor.Bot.Inbox.Expect(e => e.IsGame(30400));
+                using var switchScene = actor.Bot.Inbox.Expect(e => e.IsGame(MsgId.SwitchSceneLine));
+                using var self = actor.Bot.Inbox.Expect(e => e.IsGame(MsgId.EntitySelf));
+                using var end = actor.Bot.Inbox.Expect(e => e.IsGame(MsgId.SelfInfoEndFrameNotify));
+                await actor.Bot.SendGameAsync(30400, new EnterDungeonReq
                 {
-                    using var reply = actor.Bot.Inbox.Expect(e => e.IsGame(30400));
-                    using var switchScene = actor.Bot.Inbox.Expect(e => e.IsGame(MsgId.SwitchSceneLine));
-                    using var self = actor.Bot.Inbox.Expect(e => e.IsGame(MsgId.EntitySelf));
-                    using var end = actor.Bot.Inbox.Expect(e => e.IsGame(MsgId.SelfInfoEndFrameNotify));
-                    await actor.Bot.SendGameAsync(30400, new EnterDungeonReq
-                    {
-                        SceneEntry = SiegeScene,
-                        InitData = new DungeonInitData { SiegeInitData = new SiegeInitData { CityId = SiegeCity } }
-                    });
-                    int result = EnterDungeonRsp.Parser.ParseFrom((await reply.WaitAsync(TimeSpan.FromSeconds(30), ct)).Body).Result;
-                    if (result != 0) throw new InvalidOperationException($"siege entry refused {result}");
-                    var scene = SwitchSceneLineResp.Parser.ParseFrom((await switchScene.WaitAsync(TimeSpan.FromSeconds(30), ct)).Body);
-                    await LoadSceneAsync(actor, scene.SceneEntry, self, end, ct);
-                    if (actor.Scene != SiegeScene) throw new InvalidOperationException($"siege entry reached scene {actor.Scene}");
-                    entry.Complete(sw.Elapsed.TotalMilliseconds);
-                }
-                catch (Exception e) { entry.Fail(); throw new InvalidOperationException($"S5 {actor.Account}: {e.Message}", e); }
-                finally { gate.Release(); }
-            }));
-        report.S3SetupFixtures = [$"S5: {actors.Length} roles at level 99 (GM), guilds {guilds[0]} / {guilds[1]} with auto-accept, " +
-            $"!siege seed {SiegeCity} + !siege open (test aids), all in siege scene {SiegeScene}"];
+                    SceneEntry = SiegeScene,
+                    InitData = new DungeonInitData { SiegeInitData = new SiegeInitData { CityId = actorCity[actor.RoleId] } }
+                });
+                int result = EnterDungeonRsp.Parser.ParseFrom((await reply.WaitAsync(TimeSpan.FromSeconds(30), ct)).Body).Result;
+                if (result != 0) throw new InvalidOperationException($"siege entry refused {result}");
+                var scene = SwitchSceneLineResp.Parser.ParseFrom((await switchScene.WaitAsync(TimeSpan.FromSeconds(30), ct)).Body);
+                await LoadSceneAsync(actor, scene.SceneEntry, self, end, ct);
+                if (actor.Scene != SiegeScene) throw new InvalidOperationException($"siege entry reached scene {actor.Scene}");
+                entry.Complete(sw.Elapsed.TotalMilliseconds);
+            }
+            catch (Exception e) { entry.Fail(); throw new InvalidOperationException($"S5 {actor.Account}: {e.Message}", e); }
+            finally { gate.Release(); }
+        }));
     }
 
     private async Task RunSiegeAsync(BotActor[] actors, int seconds, CancellationToken ct)
